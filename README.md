@@ -1,5 +1,9 @@
 # Game Presence
 
+<p align="center">
+  <img src="assets/logo.png" alt="Game Presence" width="256">
+</p>
+
 A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin that shows the game you are playing on Discord while Steam is in Game Mode.
 
 Friends see a normal Discord **Playing** status, with the official game name and artwork when Discord knows the title.
