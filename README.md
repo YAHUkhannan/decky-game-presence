@@ -14,14 +14,33 @@ You need [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and a
 
 ### ZIP (easiest)
 
-1. Download [`GamePresence-1.1.0.zip`](https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip) from [Releases](https://github.com/YAHUkhannan/decky-game-presence/releases).
+1. Download [`GamePresence.zip`](https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence.zip) from [Releases](https://github.com/YAHUkhannan/decky-game-presence/releases).
 2. Game Mode → Quick Access menu → **Decky** → settings (gear).
 3. Turn on **Developer mode**.
 4. Use **Install Plugin from ZIP** (sometimes labeled **Manual plugin install**).
    - If it asks for a URL, paste:  
-     `https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip`
+     `https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence.zip`
    - If it lets you pick a file, choose the zip you downloaded.
 5. Open the Quick Access menu → **Game Presence** → leave **Show activity** on.
+
+That link always points at the newest release, so it never needs updating here.
+
+### Install script
+
+For desktop mode, or if you reinstall often. Needs a terminal.
+
+```
+curl -L https://raw.githubusercontent.com/YAHUkhannan/decky-game-presence/main/install.sh -o install.sh
+bash install.sh
+```
+
+It downloads the current `main`, offers to install Decky Loader first if it is not
+found, and copies the plugin into `~/homebrew/plugins/decky-game-presence`. It asks
+for `sudo` because that directory is owned by root.
+
+Restart Decky afterwards (`sudo systemctl restart plugin_loader`) so the plugin is
+picked up. If you already installed through the ZIP, remove the old
+`~/homebrew/plugins/GamePresence` folder first, or Decky will list the plugin twice.
 
 ### Folder copy
 
