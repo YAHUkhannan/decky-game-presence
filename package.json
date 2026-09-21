@@ -4,10 +4,10 @@
   "description": "Decky plugin that shows the current Game Mode title on Discord",
   "type": "module",
   "scripts": {},
-  "author": "Seapple69",
+  "author": "YAHUkhannan",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Seapple69/decky-game-presence.git"
+    "url": "https://github.com/YAHUkhannan/decky-game-presence.git"
   }
 }

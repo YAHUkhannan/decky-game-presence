@@ -14,12 +14,12 @@ You need [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) and a
 
 ### ZIP (easiest)
 
-1. Download [`GamePresence-1.1.0.zip`](https://github.com/Seapple69/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip) from [Releases](https://github.com/Seapple69/decky-game-presence/releases).
+1. Download [`GamePresence-1.1.0.zip`](https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip) from [Releases](https://github.com/YAHUkhannan/decky-game-presence/releases).
 2. Game Mode → Quick Access menu → **Decky** → settings (gear).
 3. Turn on **Developer mode**.
 4. Use **Install Plugin from ZIP** (sometimes labeled **Manual plugin install**).
    - If it asks for a URL, paste:  
-     `https://github.com/Seapple69/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip`
+     `https://github.com/YAHUkhannan/decky-game-presence/releases/latest/download/GamePresence-1.1.0.zip`
    - If it lets you pick a file, choose the zip you downloaded.
 5. Open the Quick Access menu → **Game Presence** → leave **Show activity** on.
 
