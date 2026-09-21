@@ -1,6 +1,6 @@
 {
   "name": "game-presence",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Decky plugin that shows the current Game Mode title on Discord",
   "type": "module",
   "scripts": {},

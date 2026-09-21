@@ -29,6 +29,7 @@ HOME = os.environ.get("DECKY_USER_HOME") or pwd.getpwnam(USER).pw_dir
 RUNTIME = f"/run/user/{UID}"
 STATE_DIR = os.environ.get("DECKY_PLUGIN_RUNTIME_DIR") or os.path.join(HOME, ".local/share/game-presence")
 OWNED_FLAG = os.path.join(STATE_DIR, "owned")
+HOLD_SCRIPT = os.path.join(STATE_DIR, "steam-hold.sh")
 XVFB_PID_FILE = os.path.join(STATE_DIR, "xvfb.pid")
 DISCORD_PID_FILE = os.path.join(STATE_DIR, "discord.pid")
 DETECTABLE_CACHE = os.path.join(STATE_DIR, "detectable.json")
@@ -518,6 +519,17 @@ def public_error(err):
     return "Couldn't update Discord. Try Reconnect."
 
 
+def write_hold_script():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    body = "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 3600; done\n"
+    try:
+        with open(HOLD_SCRIPT, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(HOLD_SCRIPT, 0o755)
+    except OSError as exc:
+        log("Could not write Steam hold script: %s", exc)
+
+
 def steam_header_url(steam_appid):
     steam_id = str(steam_appid or "").strip()
     if steam_id.isdigit() and steam_id not in IGNORE_APPIDS:
@@ -570,6 +582,7 @@ class Plugin:
         self._misses = 0
         self._from_scan = False
         os.makedirs(STATE_DIR, exist_ok=True)
+        write_hold_script()
         log("Game Presence started")
         asyncio.create_task(asyncio.to_thread(load_detectable))
         self._loop_task = asyncio.create_task(self._keepalive())
@@ -628,6 +641,7 @@ class Plugin:
             "connected": connected,
             "playing": self._current_game,
             "error": public_error(self._last_error),
+            "hold_script": HOLD_SCRIPT,
         }
 
     async def set_enabled(self, enabled: bool):

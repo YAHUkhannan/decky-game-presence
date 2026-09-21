@@ -49,14 +49,43 @@ function currentSteamApp() {
     return null;
 }
 
+let holdScript = "";
+
+async function syncSteamShortcut(name) {
+    if (!name || !SteamClient?.Apps) return;
+    const exe = holdScript;
+    if (!exe) return;
+    try {
+        let data = null;
+        if (typeof SteamClient.Apps.GetShortcutDataForPath === "function") {
+            data = await SteamClient.Apps.GetShortcutDataForPath(exe);
+        }
+        const existingId = (data && typeof data === "object")
+            ? (data.appid || data.unAppID || data.appid)
+            : null;
+        if (existingId && typeof SteamClient.Apps.SetShortcutName === "function") {
+            await SteamClient.Apps.SetShortcutName(existingId, name);
+            return;
+        }
+        if (typeof SteamClient.Apps.AddShortcut === "function") {
+            await SteamClient.Apps.AddShortcut(name, exe, "/", "");
+        }
+    } catch (err) {
+        console.error("Game Presence Steam shortcut", err);
+    }
+}
+
 async function reportApp(appid) {
     const name = overviewName(appid);
     if (shouldIgnore(name)) return;
-    await updateActivity({
-        details: { name },
-        appId: String(appid),
-        startTime: Date.now(),
-    });
+    await Promise.all([
+        updateActivity({
+            details: { name },
+            appId: String(appid),
+            startTime: Date.now(),
+        }),
+        syncSteamShortcut(name),
+    ]);
 }
 
 function Panel() {
@@ -71,7 +100,11 @@ function Panel() {
     const refresh = useCallback(async () => {
         try {
             const next = await getStatus();
-            if (next) setStatus(next);
+            if (next) {
+                if (next.hold_script) holdScript = next.hold_script;
+                setStatus(next);
+                if (next.playing) syncSteamShortcut(next.playing);
+            }
         } catch {}
     }, []);
 
@@ -176,6 +209,7 @@ var index = DFL.definePlugin(() => {
     (async () => {
         try {
             const status = await getStatus();
+            if (status?.hold_script) holdScript = status.hold_script;
             if (!status?.enabled) return;
             const appid = currentSteamApp();
             if (appid) await reportApp(appid);
