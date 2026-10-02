@@ -3,6 +3,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -21,6 +22,16 @@ OP_CLOSE = 2
 DISPLAY_NUM = ":99"
 MAX_START_FAILS = 2
 DETECTABLE_URL = "https://discord.com/api/v10/applications/detectable"
+FLATPAK_ID = "com.discordapp.Discord"
+DISCORD_FLAGS = [
+    "--start-minimized",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-gpu-compositing",
+    "--renderer-process-limit=1",
+    "--enable-low-end-device-mode",
+    "--ozone-platform=x11",
+]
 
 USER = os.environ.get("DECKY_USER") or pwd.getpwuid(int(os.environ.get("DECKY_USER_ID", "1000"))).pw_name
 UID = int(os.environ.get("DECKY_USER_ID") or pwd.getpwnam(USER).pw_uid)
@@ -138,61 +149,124 @@ def ipc_paths():
     return paths
 
 
-def find_ipc():
-    for path in ipc_paths():
-        if os.path.exists(path):
-            return path
+def _pid_uid(pid):
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("Uid:"):
+                    return int(line.split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
     return None
 
 
-def ipc_connectable():
-    path = find_ipc()
-    if not path:
-        return False
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(1.5)
+def _proc_cmdline(pid):
     try:
-        sock.connect(path)
-        return True
+        raw = open(f"/proc/{pid}/cmdline", "rb").read()
     except OSError:
-        return False
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", "replace")
 
 
-def ipc_ready():
-    rpc = Rpc(FALLBACK_CLIENT_ID)
+def _proc_environ(pid):
     try:
-        rpc.connect()
-        return True
-    except Exception:
-        return False
-    finally:
-        rpc.close()
-
-
-def discord_running():
-    try:
-        return subprocess.call(
-            ["pgrep", "-u", str(UID), "-x", "Discord"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ) == 0
+        raw = open(f"/proc/{pid}/environ", "rb").read()
     except OSError:
-        return False
+        return ""
+    return raw.decode("utf-8", "replace")
+
+
+def _discord_mains(kind=None):
+    """Main Discord processes for this user. Helpers (--type=) are ignored.
+
+    kind is "native" (distro / AUR install) or "flatpak".
+    """
+    found = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if _pid_uid(pid) != UID:
+            continue
+        cmd = _proc_cmdline(pid)
+        if not cmd or "--type=" in cmd:
+            continue
+        low = cmd.lower()
+        base = os.path.basename(cmd.split(" ", 1)[0])
+        flatpak = "com.discordapp.discord" in low or "/.var/app/com.discordapp.discord" in low
+        native = base == "Discord" and not flatpak
+        if flatpak:
+            got = "flatpak"
+        elif native:
+            got = "native"
+        else:
+            continue
+        if kind and got != kind:
+            continue
+        found.append(pid)
+    return found
 
 
 def we_own_stack():
     return os.path.exists(OWNED_FLAG)
 
 
-def clear_stale_singleton():
-    if discord_running():
+def _run_as_user(cmd):
+    try:
+        return subprocess.call(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_user_env(),
+            preexec_fn=_drop_privs,
+        )
+    except OSError:
+        return 1
+
+
+def native_cmd():
+    binary = os.path.join(HOME, ".config/discord/Discord")
+    if not os.access(binary, os.X_OK):
+        binary = "/usr/bin/discord"
+    if not os.access(binary, os.X_OK):
+        return None
+    return [binary, *DISCORD_FLAGS]
+
+
+def flatpak_cmd():
+    if not shutil.which("flatpak"):
+        return None
+    if _run_as_user(["flatpak", "info", "--user", FLATPAK_ID]) == 0:
+        prefix = ["flatpak", "run", "--user"]
+    elif _run_as_user(["flatpak", "info", FLATPAK_ID]) == 0:
+        prefix = ["flatpak", "run"]
+    else:
+        return None
+    return prefix + [
+        "--nosocket=wayland",
+        "--socket=x11",
+        "--env=DISPLAY=:99",
+        "--env=GDK_BACKEND=x11",
+        "--env=OZONE_PLATFORM=x11",
+        FLATPAK_ID,
+        *DISCORD_FLAGS,
+    ]
+
+
+def _config_dir(kind):
+    if kind == "flatpak":
+        return os.path.join(HOME, ".var/app", FLATPAK_ID, "config/discord")
+    return os.path.join(HOME, ".config/discord")
+
+
+def clear_stale_singleton(kind):
+    if _discord_mains(kind):
         return
-    cfg = os.path.join(HOME, ".config/discord")
+    cfg = _config_dir(kind)
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         path = os.path.join(cfg, name)
         try:
@@ -200,61 +274,90 @@ def clear_stale_singleton():
                 os.remove(path)
         except OSError:
             pass
+
+
+def clear_dead_ipc():
+    """Remove activity sockets that do not complete a handshake.
+
+    Flatpak leaves its socket at app/com.discordapp.Discord/, and that path is
+    checked first. A leftover file there used to hide a working native socket.
+    """
     for path in ipc_paths():
+        if not os.path.lexists(path):
+            continue
+        if _path_ready(path):
+            continue
         try:
-            if os.path.exists(path) and not ipc_connectable():
-                os.remove(path)
+            os.remove(path)
         except OSError:
             pass
 
 
-def start_hidden_discord():
-    if discord_running() or we_own_stack():
-        return None
+def ensure_xvfb():
+    pid = _read_pid(XVFB_PID_FILE)
+    socket_path = "/tmp/.X11-unix/X99"
+    if pid and os.path.exists(f"/proc/{pid}") and os.path.exists(socket_path):
+        return
+    if os.path.exists(socket_path):
+        try:
+            os.remove(socket_path)
+        except OSError:
+            pass
     os.makedirs(STATE_DIR, exist_ok=True)
-    clear_stale_singleton()
-
     xvfb = _spawn(["Xvfb", DISPLAY_NUM, "-screen", "0", "800x480x24", "-nolisten", "tcp"])
     _write_pid(XVFB_PID_FILE, xvfb.pid)
     time.sleep(1.0)
 
-    discord_bin = os.path.join(HOME, ".config/discord/Discord")
-    if not os.access(discord_bin, os.X_OK):
-        discord_bin = "/usr/bin/discord"
 
-    discord = _spawn(
-        [
-            discord_bin,
-            "--start-minimized",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-gpu-compositing",
-            "--renderer-process-limit=1",
-            "--enable-low-end-device-mode",
-            "--ozone-platform=x11",
-        ]
-    )
-    _write_pid(DISCORD_PID_FILE, discord.pid)
-    with open(OWNED_FLAG, "w", encoding="utf-8") as f:
-        f.write("1")
-    return discord.pid
+def start_hidden_discord(kind="native"):
+    """Start kind on the dummy display. Return False when there is nothing to start.
+
+    A native client that is already running is left alone. A second copy cannot
+    take the same profile, so the caller falls through to Flatpak.
+    """
+    cmd = native_cmd() if kind == "native" else flatpak_cmd()
+    if not cmd:
+        log("No %s Discord install to start", kind)
+        return False
+    if kind == "native" and _discord_mains("native"):
+        log("Native Discord is running but its activity socket is not answering")
+        return False
+    if kind == "flatpak":
+        for pid in _discord_mains("flatpak"):
+            log("Stopping leftover Flatpak Discord %s", pid)
+            _kill_pid(pid)
+        time.sleep(0.4)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    clear_dead_ipc()
+    if ipc_ready():
+        log("Activity socket appeared before %s Discord was started", kind)
+        return True
+    clear_stale_singleton(kind)
+    ensure_xvfb()
+    with open(OWNED_FLAG, "w", encoding="utf-8") as handle:
+        handle.write(kind)
+    try:
+        os.remove(DISCORD_PID_FILE)
+    except OSError:
+        pass
+    try:
+        proc = _spawn(cmd)
+    except Exception:
+        stop_hidden_discord()
+        raise
+    _write_pid(DISCORD_PID_FILE, proc.pid)
+    log("Started %s Discord", kind)
+    return True
 
 
 def stop_hidden_discord():
     if not we_own_stack():
         return
+    for pid in _discord_mains():
+        if "DISPLAY=:99" in _proc_environ(pid):
+            _kill_pid(pid)
     for path in (DISCORD_PID_FILE, XVFB_PID_FILE):
         _kill_pid(_read_pid(path))
-    if discord_running() and we_own_stack():
-        try:
-            subprocess.call(
-                ["pkill", "-u", str(UID), "-x", "Discord"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            pass
-    _kill_pid(_read_pid(XVFB_PID_FILE))
     for path in (OWNED_FLAG, XVFB_PID_FILE, DISCORD_PID_FILE):
         try:
             os.remove(path)
@@ -268,16 +371,37 @@ class Rpc:
         self.sock = None
 
     def connect(self):
-        path = find_ipc()
-        if not path:
-            raise RuntimeError("Discord IPC socket not found")
+        last = "Discord IPC socket not found"
+        saw = False
+        for path in ipc_paths():
+            if not os.path.exists(path):
+                continue
+            saw = True
+            try:
+                self._open(path)
+                return
+            except Exception as exc:
+                last = str(exc)
+                self._drop_sock()
+        raise RuntimeError(last if saw else "Discord IPC socket not found")
+
+    def _open(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(4)
+        self.sock.settimeout(2)
         self.sock.connect(path)
         self._send({"v": 1, "client_id": self.app_id}, OP_HANDSHAKE)
         data = self._recv()
         if not data or data.get("evt") != "READY":
             raise RuntimeError(f"Discord handshake failed: {data}")
+
+    def _drop_sock(self):
+        if not self.sock:
+            return
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.sock = None
 
     def set_activity(self, activity):
         payload = {
@@ -349,6 +473,49 @@ class Rpc:
                 raise TimeoutError("Discord IPC closed")
             buf += chunk
         return buf
+
+
+def _path_ready(path):
+    if not os.path.exists(path):
+        return False
+    rpc = Rpc(FALLBACK_CLIENT_ID)
+    try:
+        rpc._open(path)
+        return True
+    except Exception:
+        return False
+    finally:
+        rpc.close()
+
+
+def ipc_connectable():
+    for path in ipc_paths():
+        if not os.path.exists(path):
+            continue
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        try:
+            sock.connect(path)
+            return True
+        except OSError:
+            continue
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return False
+
+
+def ipc_ready():
+    rpc = Rpc(FALLBACK_CLIENT_ID)
+    try:
+        rpc.connect()
+        return True
+    except Exception:
+        return False
+    finally:
+        rpc.close()
 
 
 _INDEX = None
@@ -644,54 +811,50 @@ class Plugin:
             await asyncio.to_thread(stop_hidden_discord)
         return await self.get_status()
 
+    async def _launch(self, kind):
+        try:
+            started = await asyncio.to_thread(start_hidden_discord, kind)
+        except Exception as exc:
+            log("Failed to start %s Discord: %s", kind, exc)
+            await asyncio.to_thread(stop_hidden_discord)
+            return False
+        if not started:
+            return False
+        for _ in range(12):
+            if await asyncio.to_thread(ipc_ready):
+                log("Discord IPC is live via %s", kind)
+                self._fails = 0
+                self._last_error = ""
+                return True
+            if not _pid_alive(_read_pid(DISCORD_PID_FILE)):
+                log("%s Discord exited before its activity socket answered", kind)
+                break
+            await asyncio.sleep(1)
+        log("%s Discord did not open an activity socket", kind)
+        await asyncio.to_thread(stop_hidden_discord)
+        return False
+
     async def ensure_discord(self):
         if not bool(settings.getSetting("enabled", True)):
             return False
         if self._rpc and self._rpc.sock:
             self._fails = 0
             return True
-        if discord_running() and ipc_connectable():
+        if await asyncio.to_thread(ipc_ready):
             self._fails = 0
+            self._last_error = ""
             return True
-        if we_own_stack() and discord_running():
-            for _ in range(15):
-                if ipc_connectable():
-                    self._fails = 0
-                    return True
-                await asyncio.sleep(1)
-            return False
         if self._fails >= MAX_START_FAILS:
             self._last_error = "Couldn't connect. Use Reconnect."
             return False
-        if discord_running() and not we_own_stack():
-            for _ in range(8):
-                if ipc_connectable():
-                    return True
-                await asyncio.sleep(1)
-            log("Discord process is up but IPC is dead; starting hidden copy")
-
-        log("Starting Discord")
-        try:
-            await asyncio.to_thread(start_hidden_discord)
-        except Exception as exc:
-            self._fails += 1
-            self._last_error = str(exc)
-            log("Failed to start Discord: %s", exc)
-            await asyncio.to_thread(stop_hidden_discord)
-            return False
-
-        for _ in range(40):
-            if await asyncio.to_thread(ipc_ready):
-                self._fails = 0
-                self._last_error = ""
-                log("Discord IPC is live")
-                return True
-            await asyncio.sleep(1)
-
+        log("No Discord activity socket is answering. Starting a background client.")
+        if await self._launch("native"):
+            return True
+        if await self._launch("flatpak"):
+            return True
         self._fails += 1
         self._last_error = "Couldn't connect. Use Reconnect."
         log(self._last_error)
-        await asyncio.to_thread(stop_hidden_discord)
         return False
 
     async def _apply(self, desired, quiet=False):
