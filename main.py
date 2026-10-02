@@ -23,7 +23,10 @@ DISPLAY_NUM = ":99"
 MAX_START_FAILS = 2
 DETECTABLE_URL = "https://discord.com/api/v10/applications/detectable"
 FLATPAK_ID = "com.discordapp.Discord"
-DISCORD_FLAGS = [
+# Used only when a dummy X screen (Xvfb) exists. These flags crash or show a
+# blank window on a normal Game Mode display, so the session launch below
+# stays minimal.
+HEADLESS_FLAGS = [
     "--start-minimized",
     "--no-sandbox",
     "--disable-gpu",
@@ -32,6 +35,7 @@ DISCORD_FLAGS = [
     "--enable-low-end-device-mode",
     "--ozone-platform=x11",
 ]
+SESSION_FLAGS = ["--start-minimized"]
 
 USER = os.environ.get("DECKY_USER") or pwd.getpwuid(int(os.environ.get("DECKY_USER_ID", "1000"))).pw_name
 UID = int(os.environ.get("DECKY_USER_ID") or pwd.getpwnam(USER).pw_uid)
@@ -60,8 +64,51 @@ def log(msg, *args):
     decky.logger.info(msg, *args)
 
 
-def _user_env():
+def _bin(*names):
+    """Find a program even when Decky's service PATH does not include /usr/bin."""
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+        for root in ("/usr/bin", "/bin", "/usr/local/bin"):
+            path = os.path.join(root, name)
+            if os.access(path, os.X_OK):
+                return path
+    return None
+
+
+def _session_display():
+    """Return (wayland_name, x_display) for the running Game Mode or desktop session."""
+    wayland = os.environ.get("WAYLAND_DISPLAY") or ""
+    display = os.environ.get("DISPLAY") or ""
+    if not wayland and os.path.isdir(RUNTIME):
+        names = []
+        try:
+            names = os.listdir(RUNTIME)
+        except OSError:
+            names = []
+        candidates = [name for name in names if name == "gamescope-0" or name.startswith("wayland")]
+        if candidates:
+            candidates.sort(key=lambda name: (name != "gamescope-0", name))
+            wayland = candidates[0]
+    if (not display or display == DISPLAY_NUM) and os.path.isdir("/tmp/.X11-unix"):
+        numbers = []
+        try:
+            entries = os.listdir("/tmp/.X11-unix")
+        except OSError:
+            entries = []
+        for name in entries:
+            if name.startswith("X") and name[1:].isdigit() and name != "X99":
+                numbers.append(int(name[1:]))
+        if numbers:
+            display = ":" + str(min(numbers))
+    return wayland, display
+
+
+def _user_env(hidden=True):
     env = os.environ.copy()
+    path = env.get("PATH") or ""
+    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" + path
     env.update(
         {
             "HOME": HOME,
@@ -71,13 +118,26 @@ def _user_env():
             "XDG_CONFIG_HOME": os.path.join(HOME, ".config"),
             "XDG_CACHE_HOME": os.path.join(HOME, ".cache"),
             "XDG_DATA_HOME": os.path.join(HOME, ".local/share"),
-            "DISPLAY": DISPLAY_NUM,
-            "GDK_BACKEND": "x11",
-            "OZONE_PLATFORM": "x11",
         }
     )
-    env.pop("WAYLAND_DISPLAY", None)
-    env.pop("SWAYSOCK", None)
+    if hidden:
+        env["DISPLAY"] = DISPLAY_NUM
+        env["GDK_BACKEND"] = "x11"
+        env["OZONE_PLATFORM"] = "x11"
+        env.pop("WAYLAND_DISPLAY", None)
+        env.pop("SWAYSOCK", None)
+        return env
+    wayland, display = _session_display()
+    env.pop("GDK_BACKEND", None)
+    env.pop("OZONE_PLATFORM", None)
+    if wayland:
+        env["WAYLAND_DISPLAY"] = wayland
+        env.pop("DISPLAY", None)
+    elif display:
+        env["DISPLAY"] = display
+        env["GDK_BACKEND"] = "x11"
+        env["OZONE_PLATFORM"] = "x11"
+        env.pop("WAYLAND_DISPLAY", None)
     return env
 
 
@@ -88,13 +148,13 @@ def _drop_privs():
     os.chdir(HOME)
 
 
-def _spawn(cmd):
+def _spawn(cmd, hidden=True):
     os.makedirs(STATE_DIR, exist_ok=True)
     return subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=_user_env(),
+        env=_user_env(hidden=hidden),
         start_new_session=True,
         preexec_fn=_drop_privs,
     )
@@ -217,44 +277,59 @@ def we_own_stack():
 
 def _run_as_user(cmd):
     try:
-        return subprocess.call(
+        result = subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_user_env(),
+            stderr=subprocess.PIPE,
+            env=_user_env(hidden=False),
             preexec_fn=_drop_privs,
+            text=True,
+            timeout=20,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log("Command failed to start (%s): %s", cmd[0], exc)
         return 1
+    if result.returncode != 0 and result.stderr:
+        log("%s exited %s: %s", os.path.basename(cmd[0]), result.returncode, result.stderr.strip()[:300])
+    return result.returncode
 
 
-def native_cmd():
+def _discord_flags(hidden):
+    return list(HEADLESS_FLAGS if hidden else SESSION_FLAGS)
+
+
+def native_cmd(hidden=True):
     binary = os.path.join(HOME, ".config/discord/Discord")
     if not os.access(binary, os.X_OK):
-        binary = "/usr/bin/discord"
-    if not os.access(binary, os.X_OK):
+        binary = _bin("discord")
+    if not binary or not os.access(binary, os.X_OK):
         return None
-    return [binary, *DISCORD_FLAGS]
+    return [binary, *_discord_flags(hidden)]
 
 
-def flatpak_cmd():
-    if not shutil.which("flatpak"):
+def flatpak_cmd(hidden=True):
+    binary = _bin("flatpak")
+    if not binary:
+        log("The flatpak program was not found")
         return None
-    if _run_as_user(["flatpak", "info", "--user", FLATPAK_ID]) == 0:
-        prefix = ["flatpak", "run", "--user"]
-    elif _run_as_user(["flatpak", "info", FLATPAK_ID]) == 0:
-        prefix = ["flatpak", "run"]
+    if _run_as_user([binary, "info", "--user", FLATPAK_ID]) == 0:
+        prefix = [binary, "run", "--user"]
+    elif _run_as_user([binary, "info", FLATPAK_ID]) == 0:
+        prefix = [binary, "run"]
     else:
+        log("Flatpak Discord (%s) is not installed for this user", FLATPAK_ID)
         return None
-    return prefix + [
-        "--nosocket=wayland",
-        "--socket=x11",
-        "--env=DISPLAY=:99",
-        "--env=GDK_BACKEND=x11",
-        "--env=OZONE_PLATFORM=x11",
-        FLATPAK_ID,
-        *DISCORD_FLAGS,
-    ]
+    if hidden:
+        return prefix + [
+            "--nosocket=wayland",
+            "--socket=x11",
+            "--env=DISPLAY=:99",
+            "--env=GDK_BACKEND=x11",
+            "--env=OZONE_PLATFORM=x11",
+            FLATPAK_ID,
+            *_discord_flags(True),
+        ]
+    return prefix + [FLATPAK_ID, *_discord_flags(False)]
 
 
 def _config_dir(kind):
@@ -294,28 +369,35 @@ def clear_dead_ipc():
 
 
 def ensure_xvfb():
+    binary = _bin("Xvfb")
+    if not binary:
+        return False
     pid = _read_pid(XVFB_PID_FILE)
     socket_path = "/tmp/.X11-unix/X99"
     if pid and os.path.exists(f"/proc/{pid}") and os.path.exists(socket_path):
-        return
+        return True
     if os.path.exists(socket_path):
         try:
             os.remove(socket_path)
         except OSError:
             pass
     os.makedirs(STATE_DIR, exist_ok=True)
-    xvfb = _spawn(["Xvfb", DISPLAY_NUM, "-screen", "0", "800x480x24", "-nolisten", "tcp"])
+    xvfb = _spawn([binary, DISPLAY_NUM, "-screen", "0", "800x480x24", "-nolisten", "tcp"], hidden=True)
     _write_pid(XVFB_PID_FILE, xvfb.pid)
     time.sleep(1.0)
+    return True
 
 
 def start_hidden_discord(kind="native"):
-    """Start kind on the dummy display. Return False when there is nothing to start.
+    """Start kind. Return False when there is nothing to start.
 
     A native client that is already running is left alone. A second copy cannot
-    take the same profile, so the caller falls through to Flatpak.
+    take the same profile, so the caller falls through to the other install.
+    When Xvfb is missing, Discord is started minimized on the current screen
+    instead of failing. That is the usual case on a stock Steam Deck.
     """
-    cmd = native_cmd() if kind == "native" else flatpak_cmd()
+    hidden = _bin("Xvfb") is not None
+    cmd = native_cmd(hidden) if kind == "native" else flatpak_cmd(hidden)
     if not cmd:
         log("No %s Discord install to start", kind)
         return False
@@ -333,7 +415,21 @@ def start_hidden_discord(kind="native"):
         log("Activity socket appeared before %s Discord was started", kind)
         return True
     clear_stale_singleton(kind)
-    ensure_xvfb()
+    if hidden:
+        hidden = ensure_xvfb()
+    if not hidden:
+        wayland, display = _session_display()
+        reason = "Xvfb did not start" if _bin("Xvfb") else "Xvfb is not installed"
+        log(
+            "%s. Starting %s Discord on the current screen (%s)",
+            reason,
+            kind,
+            wayland or display or "no display found",
+        )
+        cmd = native_cmd(False) if kind == "native" else flatpak_cmd(False)
+        if not cmd:
+            log("No %s Discord install to start", kind)
+            return False
     with open(OWNED_FLAG, "w", encoding="utf-8") as handle:
         handle.write(kind)
     try:
@@ -341,7 +437,7 @@ def start_hidden_discord(kind="native"):
     except OSError:
         pass
     try:
-        proc = _spawn(cmd)
+        proc = _spawn(cmd, hidden=hidden)
     except Exception:
         stop_hidden_discord()
         raise
@@ -848,9 +944,11 @@ class Plugin:
             self._last_error = "Couldn't connect. Use Reconnect."
             return False
         log("No Discord activity socket is answering. Starting a background client.")
-        if await self._launch("native"):
-            return True
+        # Flatpak is the Game Mode client for people who also keep an AUR
+        # install (often with Equicord) for desktop mode. Try it first.
         if await self._launch("flatpak"):
+            return True
+        if await self._launch("native"):
             return True
         self._fails += 1
         self._last_error = "Couldn't connect. Use Reconnect."

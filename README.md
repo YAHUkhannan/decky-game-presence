@@ -63,15 +63,15 @@ This plugin does three things instead:
 
 1. **Detect the current game.** It watches Steam’s running-app events. If Steam does not list the title in the overlay, it also reads the Steam App ID from the running process (the same `AppId=` / `SteamAppId=` values Steam already uses to launch the game) and looks up the name from your installed `appmanifest_*.acf` files or Discord’s public game list.
 2. **Match Discord’s official game.** It uses [Discord’s detectable applications list](https://discord.com/api/v10/applications/detectable) and the Steam App ID so the status uses Discord’s real application (name + cover), not a generic placeholder.
-3. **Keep a background Discord client only while you play.** The client runs on a dummy display, at low priority, and is stopped when the game exits. A Discord process left over from desktop mode or from quitting Flatpak is not reused unless its activity socket answers a real handshake. The plugin then starts the normal install, and if that never answers it starts Flatpak Discord instead. The Rich Presence connection stays open for the whole session so Discord does not fall back to the raw `.exe` name.
+3. **Keep a background Discord client only while you play.** The client runs at low priority and is stopped when the game exits. If `Xvfb` is installed it uses an invisible screen. If not, Discord is opened minimized on the current screen. A Discord process left over from desktop mode or from quitting Flatpak is not reused unless its activity socket answers a real handshake. Flatpak Discord is tried first, then the normal install. The Rich Presence connection stays open for the whole session so Discord does not fall back to the raw `.exe` name.
 
 This is Discord Rich Presence only. It does not Go Live, share video, or change what Steam friends see.
 
 ## Requirements
 
 - Linux / Steam Deck / CachyOS Deckify (or similar) with Decky Loader
-- Discord installed and logged in. The distro package is tried first. Flatpak (`com.discordapp.Discord`) is used when that package is missing or its activity socket never answers.
-- `Xvfb` (`xorg-server-xvfb` on Arch)
+- Discord installed and logged in. Flatpak (`com.discordapp.Discord`) is tried first, then the distro package.
+- `Xvfb` is optional (`xorg-server-xvfb` on Arch). Without it, Discord opens minimized on the current screen instead of on an invisible one.
 
 ## Development
 
