@@ -52,7 +52,7 @@ Launch a game from Steam. After a few seconds, Discord should show that title.
 
 - **Show activity** — turn reporting on or off
 - **Now playing** — the title currently sent to Discord
-- **Reconnect** — appears if Discord did not accept the status
+- **Reconnect** — shown when Discord is not connected, or the last update failed. Clears the failure lock and tries again.
 - **Clear** — remove the status
 
 ## How it works
@@ -63,7 +63,7 @@ This plugin does three things instead:
 
 1. **Detect the current game.** It watches Steam’s running-app events. If Steam does not list the title in the overlay, it also reads the Steam App ID from the running process (the same `AppId=` / `SteamAppId=` values Steam already uses to launch the game) and looks up the name from your installed `appmanifest_*.acf` files or Discord’s public game list.
 2. **Match Discord’s official game.** It uses [Discord’s detectable applications list](https://discord.com/api/v10/applications/detectable) and the Steam App ID so the status uses Discord’s real application (name + cover), not a generic placeholder.
-3. **Keep a background Discord client only while you play.** The client runs at low priority and is stopped when the game exits. If `Xvfb` is installed it uses an invisible screen. If not, Discord is opened minimized on the current screen. A Discord process left over from desktop mode or from quitting Flatpak is not reused unless its activity socket answers a real handshake. Flatpak Discord is tried first, then the normal install. The Rich Presence connection stays open for the whole session so Discord does not fall back to the raw `.exe` name.
+3. **Keep a background Discord client only while you play.** The client runs at low priority and is stopped when the game exits. If `Xvfb` is installed, Discord starts on an invisible screen. That launch does not pass `--disable-gpu`, because current Discord also turns off software rendering and then dies before its activity socket is usable. If that client exits, or `Xvfb` is missing, Discord is opened minimized on the current screen. A Discord that is already open is reused when its activity socket answers. A second copy is not started, because Discord quits it as a secondary instance. Flatpak Discord is tried first, then the normal install. The Rich Presence connection stays open for the whole session so Discord does not fall back to the raw `.exe` name. **Reconnect** clears a failed start and tries again, including when no game is in the foreground.
 
 This is Discord Rich Presence only. It does not Go Live, share video, or change what Steam friends see.
 

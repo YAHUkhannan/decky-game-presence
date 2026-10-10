@@ -23,16 +23,13 @@ DISPLAY_NUM = ":99"
 MAX_START_FAILS = 2
 DETECTABLE_URL = "https://discord.com/api/v10/applications/detectable"
 FLATPAK_ID = "com.discordapp.Discord"
-# Used only when a dummy X screen (Xvfb) exists. These flags crash or show a
-# blank window on a normal Game Mode display, so the session launch below
-# stays minimal.
+# Used only when a dummy X screen (Xvfb) exists. Do not pass --disable-gpu.
+# Discord 1.0.161 turns that switch into --disable-software-rasterizer as
+# well, and Electron then dies on Xvfb before the activity socket is usable.
+# A normal Game Mode display only gets --start-minimized (SESSION_FLAGS).
 HEADLESS_FLAGS = [
     "--start-minimized",
     "--no-sandbox",
-    "--disable-gpu",
-    "--disable-gpu-compositing",
-    "--renderer-process-limit=1",
-    "--enable-low-end-device-mode",
     "--ozone-platform=x11",
 ]
 SESSION_FLAGS = ["--start-minimized"]
@@ -388,7 +385,7 @@ def ensure_xvfb():
     return True
 
 
-def start_hidden_discord(kind="native"):
+def start_hidden_discord(kind="native", hidden=None):
     """Start kind. Return False when there is nothing to start.
 
     A native client that is already running is left alone. A second copy cannot
@@ -396,7 +393,8 @@ def start_hidden_discord(kind="native"):
     When Xvfb is missing, Discord is started minimized on the current screen
     instead of failing. That is the usual case on a stock Steam Deck.
     """
-    hidden = _bin("Xvfb") is not None
+    if hidden is None:
+        hidden = _bin("Xvfb") is not None
     cmd = native_cmd(hidden) if kind == "native" else flatpak_cmd(hidden)
     if not cmd:
         log("No %s Discord install to start", kind)
@@ -419,10 +417,8 @@ def start_hidden_discord(kind="native"):
         hidden = ensure_xvfb()
     if not hidden:
         wayland, display = _session_display()
-        reason = "Xvfb did not start" if _bin("Xvfb") else "Xvfb is not installed"
         log(
-            "%s. Starting %s Discord on the current screen (%s)",
-            reason,
+            "Starting %s Discord on the current screen (%s)",
             kind,
             wayland or display or "no display found",
         )
@@ -885,7 +881,10 @@ class Plugin:
                 log("keepalive error: %s", exc)
 
     async def get_status(self):
-        connected = bool(self._rpc and self._rpc.sock) or ipc_connectable()
+        # Do not open the socket here. A connect that never sends a handshake
+        # makes Discord close it after 10 seconds and can crowd out a real one.
+        socket_up = any(os.path.exists(path) for path in ipc_paths())
+        connected = bool(self._rpc and self._rpc.sock) or socket_up
         return {
             "enabled": bool(settings.getSetting("enabled", True)),
             "connected": connected,
@@ -905,18 +904,40 @@ class Plugin:
             self._current_game = ""
             await self._drop_rpc(clear=True)
             await asyncio.to_thread(stop_hidden_discord)
+            return await self.get_status()
+        self._fails = 0
+        self._last_error = ""
+        if self._desired:
+            await self._apply(self._desired)
+        else:
+            await self.ensure_discord()
         return await self.get_status()
 
-    async def _launch(self, kind):
+    async def reconnect(self):
+        """Drop the failure lock and try the activity socket again.
+
+        The Quick Access button used to call set_enabled(true) only. After two
+        failed starts that returned immediately, so the button did nothing.
+        """
+        self._fails = 0
+        self._last_error = ""
+        await self._drop_rpc(clear=False)
+        if self._desired:
+            await self._apply(self._desired)
+        else:
+            await self.ensure_discord()
+        return await self.get_status()
+
+    async def _launch_once(self, kind, hidden):
         try:
-            started = await asyncio.to_thread(start_hidden_discord, kind)
+            started = await asyncio.to_thread(start_hidden_discord, kind, hidden)
         except Exception as exc:
             log("Failed to start %s Discord: %s", kind, exc)
             await asyncio.to_thread(stop_hidden_discord)
             return False
         if not started:
             return False
-        for _ in range(12):
+        for _ in range(30):
             if await asyncio.to_thread(ipc_ready):
                 log("Discord IPC is live via %s", kind)
                 self._fails = 0
@@ -930,6 +951,15 @@ class Plugin:
         await asyncio.to_thread(stop_hidden_discord)
         return False
 
+    async def _launch(self, kind):
+        hidden_first = _bin("Xvfb") is not None
+        if await self._launch_once(kind, hidden_first):
+            return True
+        if not hidden_first:
+            return False
+        log("Retrying %s Discord on the current screen", kind)
+        return await self._launch_once(kind, False)
+
     async def ensure_discord(self):
         if not bool(settings.getSetting("enabled", True)):
             return False
@@ -942,6 +972,18 @@ class Plugin:
             return True
         if self._fails >= MAX_START_FAILS:
             self._last_error = "Couldn't connect. Use Reconnect."
+            return False
+        if _discord_mains("native") or _discord_mains("flatpak"):
+            log("Discord is already running. Waiting for its activity socket.")
+            for _ in range(20):
+                if await asyncio.to_thread(ipc_ready):
+                    self._fails = 0
+                    self._last_error = ""
+                    return True
+                await asyncio.sleep(1)
+            self._fails += 1
+            self._last_error = "Couldn't connect. Use Reconnect."
+            log("Running Discord did not answer. Not starting a second copy.")
             return False
         log("No Discord activity socket is answering. Starting a background client.")
         # Flatpak is the Game Mode client for people who also keep an AUR

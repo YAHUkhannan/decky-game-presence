@@ -15,6 +15,7 @@ const getStatus = callable("get_status");
 const setEnabled = callable("set_enabled");
 const updateActivity = callable("update_activity");
 const clearActivity = callable("clear_activity");
+const reconnect = callable("reconnect");
 
 const e = window.SP_REACT.createElement;
 const { useEffect, useState, useCallback } = window.SP_REACT;
@@ -99,7 +100,8 @@ function Panel() {
     const onReconnect = useCallback(async () => {
         setBusy(true);
         try {
-            await setEnabled(true);
+            const next = await reconnect();
+            if (next) setStatus(next);
             const appid = currentSteamApp();
             if (appid) await reportApp(appid);
         } finally {
@@ -134,7 +136,7 @@ function Panel() {
         e(DFL.PanelSectionRow, null,
             e(DFL.Field, { label: "Now playing" }, statusText)
         ),
-        status.error
+        (!status.connected || status.error)
             ? e(DFL.PanelSectionRow, null,
                 e(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: onReconnect }, "Reconnect")
               )
